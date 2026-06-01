@@ -2485,7 +2485,10 @@ static void *create_process_object( HANDLE handle )
     process->header.Type = 3;
     process->header.WaitListHead.Blink = INVALID_HANDLE_VALUE; /* mark as kernel object */
     NtQueryInformationProcess( handle, ProcessBasicInformation, &process->info, sizeof(process->info), NULL );
+    NtQueryInformationProcess( handle, ProcessSessionInformation, &process->session_id, sizeof(process->session_id), NULL );
+    NtQueryInformationProcess( handle, ProcessTimes, &process->times, sizeof(process->times), NULL );
     IsWow64Process( handle, &process->wow64 );
+
     return process;
 }
 
@@ -2537,6 +2540,15 @@ HANDLE WINAPI PsGetProcessId(PEPROCESS process)
 }
 
 /*********************************************************************
+ *           PsGetProcessPeb    (NTOSKRNL.@)
+ */
+PEB *WINAPI PsGetProcessPeb(PEPROCESS process)
+{
+    TRACE( "%p -> %p\n", process, process->info.PebBaseAddress );
+    return process->info.PebBaseAddress;
+}
+
+/*********************************************************************
  *           PsGetProcessInheritedFromUniqueProcessId  (NTOSKRNL.@)
  */
 HANDLE WINAPI PsGetProcessInheritedFromUniqueProcessId( PEPROCESS process )
@@ -2544,6 +2556,24 @@ HANDLE WINAPI PsGetProcessInheritedFromUniqueProcessId( PEPROCESS process )
     HANDLE id = (HANDLE)process->info.InheritedFromUniqueProcessId;
     TRACE( "%p -> %p\n", process, id );
     return id;
+}
+
+/*********************************************************************
+ *           PsGetProcessSessionId    (NTOSKRNL.@)
+ */
+ULONG WINAPI PsGetProcessSessionId( PEPROCESS process )
+{
+    TRACE("%p -> %lu\n", process, process->session_id);
+    return process->session_id;
+}
+
+/*********************************************************************
+ *           PsGetProcessCreateTimeQuadPart    (NTOSKRNL.@)
+ */
+LONGLONG WINAPI PsGetProcessCreateTimeQuadPart( PEPROCESS process )
+{
+    TRACE("%p -> %I64x\n", process, process->times.CreateTime.QuadPart);
+    return process->times.CreateTime.QuadPart;
 }
 
 static void *create_thread_object( HANDLE handle )
@@ -2561,6 +2591,7 @@ static void *create_thread_object( HANDLE handle )
     if (!NtQueryInformationThread( handle, ThreadBasicInformation, &info, sizeof(info), NULL ))
     {
         thread->id = info.ClientId;
+        thread->teb = info.TebBaseAddress;
         if ((process = OpenProcess( PROCESS_QUERY_INFORMATION, FALSE, HandleToUlong(thread->id.UniqueProcess) )))
         {
             kernel_object_from_handle( process, PsProcessType, (void**)&thread->process );
@@ -2638,6 +2669,15 @@ HANDLE WINAPI PsGetThreadId(PETHREAD thread)
 {
     TRACE( "%p -> %p\n", thread, thread->kthread.id.UniqueThread );
     return thread->kthread.id.UniqueThread;
+}
+
+/*********************************************************************
+ *           PsGetThreadProcess    (NTOSKRNL.@)
+ */
+PEPROCESS WINAPI PsGetThreadProcess(PETHREAD thread)
+{
+    TRACE("%p -> %p\n", thread, thread->kthread.process);
+    return thread->kthread.process;
 }
 
 /*********************************************************************
@@ -2824,6 +2864,37 @@ void WINAPI KeRevertToUserAffinityThreadEx(KAFFINITY affinity)
 }
 
 /***********************************************************************
+ *           KeRegisterBugCheckCallback   (NTOSKRNL.EXE.@)
+ */
+BOOL WINAPI KeRegisterBugCheckCallback(void *record, void *routine,
+                                       void *buffer, ULONG length, char *component)
+{
+    FIXME("%p %p %p %lu %s stub!\n", record, routine, buffer, length, debugstr_a(component));
+
+    return TRUE;
+}
+
+/***********************************************************************
+ *           KeRegisterBugCheckReasonCallback   (NTOSKRNL.EXE.@)
+ */
+BOOL WINAPI KeRegisterBugCheckReasonCallback(void *record, void *routine, ULONG reason, char *component)
+{
+    FIXME("%p %p %lu %s stub!\n", record, routine, reason, debugstr_a(component));
+
+    return TRUE;
+}
+
+/***********************************************************************
+ *           KeDeregisterBugCheckReasonCallback   (NTOSKRNL.EXE.@)
+ */
+BOOL WINAPI KeDeregisterBugCheckReasonCallback(void *record)
+{
+    FIXME("%p stub!\n", record);
+
+    return TRUE;
+}
+
+/***********************************************************************
  *           IoRegisterFileSystem   (NTOSKRNL.EXE.@)
  */
 VOID WINAPI IoRegisterFileSystem(PDEVICE_OBJECT DeviceObject)
@@ -2957,6 +3028,16 @@ PHYSICAL_ADDRESS WINAPI MmGetPhysicalAddress(void *virtual_address)
     FIXME("(%p): semi-stub\n", virtual_address);
     ret.QuadPart = (ULONG_PTR)virtual_address;
     return ret;
+}
+
+/***********************************************************************
+ *           MmGetVirtualForPhysical   (NTOSKRNL.EXE.@)
+ */
+void *WINAPI MmGetVirtualForPhysical(PHYSICAL_ADDRESS addr)
+{
+    ULONG_PTR ret = addr.QuadPart;
+    FIXME("(%p): semi-stub!\n", (void *)ret);
+    return (void *)ret;
 }
 
 /***********************************************************************
@@ -3251,6 +3332,29 @@ HANDLE WINAPI PsGetCurrentThreadId(void)
     return KeGetCurrentThread()->id.UniqueThread;
 }
 
+/***********************************************************************
+ *           PsGetCurrentThreadTeb   (NTOSKRNL.EXE.@)
+ */
+TEB *WINAPI PsGetCurrentThreadTeb(void)
+{
+    return KeGetCurrentThread()->teb;
+}
+
+/***********************************************************************
+ *           PsGetCurrentThreadProcess   (NTOSKRNL.EXE.@)
+ */
+PEPROCESS WINAPI PsGetCurrentThreadProcess(void)
+{
+    return KeGetCurrentThread()->process;
+}
+
+/***********************************************************************
+ *           PsGetCurrentThreadProcess   (NTOSKRNL.EXE.@)
+ */
+HANDLE WINAPI PsGetCurrentThreadProcessId(void)
+{
+    return PsGetProcessId(PsGetCurrentThreadProcess());
+}
 
 /***********************************************************************
  *           PsIsSystemThread   (NTOSKRNL.EXE.@)
@@ -3751,7 +3855,17 @@ void WINAPI KeBugCheckEx(ULONG code, ULONG_PTR param1, ULONG_PTR param2, ULONG_P
  */
 void WINAPI ProbeForRead(void *address, SIZE_T length, ULONG alignment)
 {
-    FIXME("(%p %Iu %lu) stub\n", address, length, alignment);
+    TRACE("(%p %Iu %lu)\n", address, length, alignment);
+
+    if (length == 0) return;
+
+    if ((ULONG_PTR)address & (alignment-1))
+        RtlRaiseStatus(STATUS_DATATYPE_MISALIGNMENT);
+
+    if ((ULONG_PTR)address + length < (ULONG_PTR)address)
+        RtlRaiseStatus(STATUS_ACCESS_VIOLATION);
+
+    /* TODO: Check if within address space */
 }
 
 /***********************************************************************
@@ -3759,7 +3873,14 @@ void WINAPI ProbeForRead(void *address, SIZE_T length, ULONG alignment)
  */
 void WINAPI ProbeForWrite(void *address, SIZE_T length, ULONG alignment)
 {
-    FIXME("(%p %Iu %lu) stub\n", address, length, alignment);
+    TRACE("(%p %Iu %lu)\n", address, length, alignment);
+
+    if (length == 0) return;
+
+    ProbeForRead(address, length, alignment);
+
+    for (volatile char *p = address; p < (char *)address + length; p++)
+        *p |= 0;
 }
 
 /***********************************************************************
@@ -4706,6 +4827,14 @@ NTSTATUS WINAPI KdChangeOption(ULONG option, ULONG in_size, PVOID in_buffer,
     return STATUS_DEBUGGER_INACTIVE;
 }
 
+NTSTATUS WINAPI KeCapturePersistentThreadState(CONTEXT *context, PKTHREAD thread, ULONG code,
+                                               ULONG param1, ULONG param2, ULONG param3, ULONG param4, void *addr)
+{
+    FIXME("%p %p %lu %lu %lu %lu %lu %p", context, thread, code, param1, param2, param3, param4, addr);
+
+    return STATUS_NOT_IMPLEMENTED;
+}
+
 NTSTATUS WINAPI KdDisableDebugger(void)
 {
     FIXME(": stub.\n");
@@ -4755,6 +4884,12 @@ NTSTATUS WINAPI EtwUnregister(REGHANDLE handle)
 {
     FIXME("handle %I64x\n", handle);
     return STATUS_SUCCESS;
+}
+
+BOOL WINAPI VslGetSecurePciEnabled(void)
+{
+    FIXME("stub!\n");
+    return TRUE;
 }
 
 /*****************************************************
