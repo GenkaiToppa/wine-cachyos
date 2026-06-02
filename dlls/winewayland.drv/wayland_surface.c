@@ -61,10 +61,13 @@ static void xdg_surface_handle_configure(void *private, struct xdg_surface *xdg_
             surface->pending.caps = surface->current.caps;
         if (!surface->pending.decor && surface->current.decor)
             surface->pending.decor = surface->current.decor;
-        else if (surface->pending.decor)
+        else if (!surface->pending.decor && surface->requested.decor)
+            surface->pending.decor = surface->requested.decor;
+        if (surface->pending.decor &&
+            surface->pending.decor != surface->current.decor)
         {
-            should_post |= (surface->pending.decor != surface->current.decor);
-            initial_configure |= (surface->pending.decor != surface->current.decor);
+            should_post = TRUE;
+            initial_configure = TRUE;
         }
         surface->requested = surface->pending;
         memset(&surface->pending, 0, sizeof(surface->pending));
@@ -209,6 +212,7 @@ void wp_fractional_scale_handle_scale(void* user_data,
                                       uint32_t scale_fixed)
 {
     struct wayland_win_data *data;
+    struct wayland_client_surface *client;
     struct wayland_surface *surface;
     HWND hwnd = user_data;
     BOOL updated = FALSE;
@@ -224,12 +228,9 @@ void wp_fractional_scale_handle_scale(void* user_data,
 
             if (updated)
             {
-                /* detach the client surface as its rect has changed */
-                if (data->client_surface)
-                {
-                    wayland_client_surface_attach(data->client_surface, NULL);
-                    data->client_surface = NULL;
-                }
+                /* reattach the client surface as its rect has changed */
+                if ((client = data->client_surface))
+                    wayland_client_surface_attach(client, client->toplevel);
 
                 /* the subsurface rect has changed */
                 if (surface->role == WAYLAND_SURFACE_ROLE_SUBSURFACE)
@@ -946,7 +947,10 @@ static BOOL wayland_surface_reconfigure_xdg(struct wayland_surface *surface,
     {
         surface->current = surface->processing;
         memset(&surface->processing, 0, sizeof(surface->processing));
-        xdg_surface_ack_configure(surface->xdg_surface, surface->current.serial);
+        /* if a decoration change occured during the initial configure, avoid
+         * a double ack as that would cause a protocol error */
+        if (surface->processing.serial != surface->current.serial)
+            xdg_surface_ack_configure(surface->xdg_surface, surface->current.serial);
     }
     /* If this is the initial configure, and we have a compatible requested
      * config, use that, in order to draw windows that don't go through the
@@ -958,6 +962,9 @@ static BOOL wayland_surface_reconfigure_xdg(struct wayland_surface *surface,
     {
         surface->current = surface->requested;
         memset(&surface->requested, 0, sizeof(surface->requested));
+        /* decoration changes must go through the message loop */
+        surface->requested.decor = surface->current.decor;
+        surface->current.decor = 0;
         xdg_surface_ack_configure(surface->xdg_surface, surface->current.serial);
     }
     else if (!surface->current.serial ||
@@ -1399,7 +1406,10 @@ static void wayland_client_surface_update(struct client_surface *client)
         if (toplevel && NtUserIsWindowVisible(hwnd))
             wayland_client_surface_attach(surface, toplevel);
         else
+        {
             wayland_client_surface_attach(surface, NULL);
+            data->client_surface = NULL;
+        }
     }
 
     wayland_win_data_release(data);
@@ -1664,6 +1674,10 @@ void wayland_surface_ensure_contents(struct wayland_surface *surface,
 
         wayland_surface_attach_shm(surface, dummy_shm_buffer, damage);
         wl_surface_commit(surface->wl_surface);
+    }
+    else
+    {
+        TRACE("Wayland surface not configured yet, not flushing\n");
     }
 
     if (damage) NtGdiDeleteObjectApp(damage);
