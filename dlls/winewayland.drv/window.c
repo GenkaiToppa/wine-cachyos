@@ -565,7 +565,10 @@ void WAYLAND_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UIN
             if (toplevel && NtUserIsWindowVisible(hwnd))
                 wayland_client_surface_attach(client, toplevel);
             else
+            {
                 wayland_client_surface_attach(client, NULL);
+                data->client_surface = NULL;
+            }
         }
 
         if (data->wayland_surface)
@@ -611,9 +614,21 @@ static void wayland_configure_window(HWND hwnd)
 
     if (!surface->requested.serial)
     {
-        TRACE("requested configure event already handled, returning\n");
-        wayland_win_data_release(data);
-        return;
+        /* leftover decor from an initial configure */
+        if (surface->requested.decor && surface->current.serial &&
+            surface->requested.decor != surface->current.decor)
+        {
+            int decor = surface->requested.decor;
+            surface->requested = surface->current;
+            surface->requested.decor = decor;
+            surface->requested.processed = FALSE;
+        }
+        else
+        {
+            TRACE("hwnd=%p requested configure event already handled, returning\n", hwnd);
+            wayland_win_data_release(data);
+            return;
+        }
     }
 
     surface->processing = surface->requested;
@@ -1023,7 +1038,10 @@ void set_client_surface(HWND hwnd, struct wayland_client_surface *new_client)
             if (toplevel && NtUserIsWindowVisible(hwnd))
                 wayland_client_surface_attach(new_client, toplevel);
             else
+            {
                 wayland_client_surface_attach(new_client, NULL);
+                data->client_surface = NULL;
+            }
         }
     }
 
